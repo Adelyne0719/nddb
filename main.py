@@ -84,6 +84,26 @@ def save_counts(counts: dict):
 user_spell_counts = load_counts()
 
 
+def make_accuracy_bar(user_month: dict, bar_length: int = 15) -> str:
+    """정확도 텍스트아트 바를 생성합니다."""
+    total = user_month.get("_total", 0)
+    if total == 0:
+        return ""
+    error_count = sum(v for k, v in user_month.items() if k != "_total")
+    correct = total - error_count
+    ratio = correct / total
+
+    filled = round(ratio * bar_length)
+    empty = bar_length - filled
+    bar = "█" * filled + "░" * empty
+
+    return (
+        f"\n**정확도**\n"
+        f"`{bar}` **{ratio:.0%}**\n"
+        f"✅ {correct}회 정확 / ❌ {error_count}회 오류 (총 {total}회)"
+    )
+
+
 @bot.event
 async def on_ready():
     activity = discord.Game(name="!도움")
@@ -109,12 +129,7 @@ async def on_message(message):
     try:
         result = await checker.check(message.content)
 
-        if result is None:
-            return
-
-        # 교정 메시지 생성
-        lines = [f"{message.author.mention} 님, '되/돼' 맞춤법을 확인해 주세요!\n"]
-
+        # 되/돼 검사 총 횟수 기록
         month_key = datetime.now().strftime("%Y-%m")
         user_id = str(message.author.id)
         if user_id not in user_spell_counts:
@@ -122,6 +137,14 @@ async def on_message(message):
         if month_key not in user_spell_counts[user_id]:
             user_spell_counts[user_id][month_key] = {}
         user_month = user_spell_counts[user_id][month_key]
+        user_month["_total"] = user_month.get("_total", 0) + 1
+
+        if result is None:
+            save_counts(user_spell_counts)
+            return
+
+        # 교정 메시지 생성
+        lines = [f"{message.author.mention} 님, '되/돼' 맞춤법을 확인해 주세요!\n"]
 
         for c in result["corrections"]:
             lines.append(f"❌ {c['original']}  →  ✅ {c['corrected']}")
@@ -158,11 +181,12 @@ async def stats(ctx, target_user: discord.Member = None):
 
     user_month = user_spell_counts.get(user_id, {}).get(month_key)
 
-    if not user_month:
+    if not user_month or not any(k != "_total" for k in user_month):
         await ctx.send(f"**{target_user.display_name}** 님은 {month_display}에 맞춤법을 틀린 기록이 없습니다!")
         return
 
-    sorted_stats = sorted(user_month.items(), key=lambda x: x[1], reverse=True)
+    error_stats = {k: v for k, v in user_month.items() if k != "_total"}
+    sorted_stats = sorted(error_stats.items(), key=lambda x: x[1], reverse=True)
 
     embed = discord.Embed(
         title=f"{target_user.display_name} 님의 {month_display} 맞춤법 통계",
@@ -172,6 +196,8 @@ async def stats(ctx, target_user: discord.Member = None):
     lines = []
     for rank, (key, count) in enumerate(sorted_stats, 1):
         lines.append(f"**{rank}.** {key} — **{count}회**")
+
+    lines.append(make_accuracy_bar(user_month))
 
     embed.description = "\n".join(lines)
     await ctx.send(embed=embed)
@@ -196,7 +222,8 @@ async def all_stats(ctx, target_user: discord.Member = None):
         for key, count in month_counts.items():
             total[key] = total.get(key, 0) + count
 
-    sorted_stats = sorted(total.items(), key=lambda x: x[1], reverse=True)
+    error_stats = {k: v for k, v in total.items() if k != "_total"}
+    sorted_stats = sorted(error_stats.items(), key=lambda x: x[1], reverse=True)
 
     embed = discord.Embed(
         title=f"{target_user.display_name} 님의 전체 누적 맞춤법 통계",
@@ -206,6 +233,8 @@ async def all_stats(ctx, target_user: discord.Member = None):
     lines = []
     for rank, (key, count) in enumerate(sorted_stats, 1):
         lines.append(f"**{rank}.** {key} — **{count}회**")
+
+    lines.append(make_accuracy_bar(total))
 
     embed.description = "\n".join(lines)
     await ctx.send(embed=embed)
