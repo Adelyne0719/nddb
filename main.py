@@ -1,26 +1,65 @@
 import os
+import sys
 import json
+import logging
 import discord
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from discord.ext import commands
 from dotenv import load_dotenv
 from grammar_checker import GrammarChecker
 
-load_dotenv()
+# --- 경로 설정 (PyInstaller 원파일 패키징 지원) ---
+if getattr(sys, "frozen", False):
+    # .exe로 실행: exe가 있는 실제 폴더
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    # .py로 실행: 스크립트가 있는 폴더
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+ENV_FILE = os.path.join(BASE_DIR, ".env")
+COUNT_FILE = os.path.join(BASE_DIR, "spell_check_counts.json")
+LOG_FILE = os.path.join(BASE_DIR, "nddb.log")
+
+# --- 로깅 설정 (5MB x 3파일 로테이션) ---
+logger = logging.getLogger("nddb")
+logger.setLevel(logging.INFO)
+file_handler = RotatingFileHandler(
+    LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+)
+file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
+# --- .env 파일 자동 생성 ---
+if not os.path.exists(ENV_FILE):
+    with open(ENV_FILE, "w", encoding="utf-8") as f:
+        f.write("DISCORD_TOKEN=여기에_디스코드_봇_토큰_입력\n")
+        f.write("GEMINI_API_KEY=여기에_제미나이_API_키_입력\n")
+    logger.info(f".env 파일이 생성되었습니다: {ENV_FILE}")
+    logger.info("DISCORD_TOKEN과 GEMINI_API_KEY를 입력한 뒤 다시 실행해 주세요.")
+    input("엔터를 누르면 종료됩니다...")
+    sys.exit(0)
+
+load_dotenv(ENV_FILE)
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# 파일 경로
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-COUNT_FILE = os.path.join(SCRIPT_DIR, "spell_check_counts.json")
+if not DISCORD_TOKEN or not GEMINI_API_KEY \
+        or "여기에" in DISCORD_TOKEN or "여기에" in GEMINI_API_KEY:
+    logger.warning(f".env 파일에 토큰/키를 입력해 주세요: {ENV_FILE}")
+    input("엔터를 누르면 종료됩니다...")
+    sys.exit(0)
 
-# 봇 설정
+# --- 봇 설정 ---
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, max_messages=100)
 checker = GrammarChecker(api_key=GEMINI_API_KEY)
 
 
@@ -35,8 +74,11 @@ def load_counts() -> dict:
 
 
 def save_counts(counts: dict):
-    with open(COUNT_FILE, "w", encoding="utf-8") as f:
+    # atomic write: 임시 파일에 쓴 뒤 이름 변경 (정전 시 파일 손상 방지)
+    tmp_file = COUNT_FILE + ".tmp"
+    with open(tmp_file, "w", encoding="utf-8") as f:
         json.dump(counts, f, indent=4, ensure_ascii=False)
+    os.replace(tmp_file, COUNT_FILE)
 
 
 user_spell_counts = load_counts()
@@ -44,7 +86,9 @@ user_spell_counts = load_counts()
 
 @bot.event
 async def on_ready():
-    print(f"봇 로그인 완료: {bot.user.name}")
+    activity = discord.Game(name="!도움")
+    await bot.change_presence(activity=activity)
+    logger.info(f"봇 로그인 완료: {bot.user.name}")
 
 
 @bot.event
@@ -62,39 +106,44 @@ async def on_message(message):
     if not checker._contains_doe_dwae(message.content):
         return
 
-    result = await checker.check(message.content)
+    try:
+        result = await checker.check(message.content)
 
-    if result is None:
-        return
+        if result is None:
+            return
 
-    # 교정 메시지 생성
-    lines = [f"{message.author.mention} 님, '되/돼' 맞춤법을 확인해 주세요!\n"]
+        # 교정 메시지 생성
+        lines = [f"{message.author.mention} 님, '되/돼' 맞춤법을 확인해 주세요!\n"]
 
-    month_key = datetime.now().strftime("%Y-%m")
-    user_id = str(message.author.id)
-    if user_id not in user_spell_counts:
-        user_spell_counts[user_id] = {}
-    if month_key not in user_spell_counts[user_id]:
-        user_spell_counts[user_id][month_key] = {}
-    user_month = user_spell_counts[user_id][month_key]
+        month_key = datetime.now().strftime("%Y-%m")
+        user_id = str(message.author.id)
+        if user_id not in user_spell_counts:
+            user_spell_counts[user_id] = {}
+        if month_key not in user_spell_counts[user_id]:
+            user_spell_counts[user_id][month_key] = {}
+        user_month = user_spell_counts[user_id][month_key]
 
-    for c in result["corrections"]:
-        lines.append(f"❌ {c['original']}  →  ✅ {c['corrected']}")
-        lines.append(f"💡 {c['explanation']}\n")
+        for c in result["corrections"]:
+            lines.append(f"❌ {c['original']}  →  ✅ {c['corrected']}")
+            lines.append(f"💡 {c['explanation']}\n")
 
-        sub_key = f"{c['original']}→{c['corrected']}"
-        user_month[sub_key] = user_month.get(sub_key, 0) + 1
+            sub_key = f"{c['original']}→{c['corrected']}"
+            user_month[sub_key] = user_month.get(sub_key, 0) + 1
 
-    save_counts(user_spell_counts)
+        save_counts(user_spell_counts)
 
-    # 이번에 틀린 항목의 누적 횟수 표시
-    count_parts = []
-    for c in result["corrections"]:
-        sub_key = f"{c['original']}→{c['corrected']}"
-        count_parts.append(f"{sub_key} {user_month[sub_key]}회")
-    lines.append(f"({', '.join(count_parts)})")
+        # 이번에 틀린 항목의 누적 횟수 표시
+        count_parts = []
+        for c in result["corrections"]:
+            sub_key = f"{c['original']}→{c['corrected']}"
+            count_parts.append(f"{sub_key} {user_month[sub_key]}회")
+        lines.append(f"({', '.join(count_parts)})")
 
-    await message.channel.send("\n".join(lines))
+        await message.channel.send("\n".join(lines))
+        logger.info(f"교정: {message.author} - {[c['original']+'→'+c['corrected'] for c in result['corrections']]}")
+
+    except Exception as e:
+        logger.error(f"메시지 처리 중 오류: {e}", exc_info=True)
 
 
 @bot.command(name="통계", aliases=["stats"])

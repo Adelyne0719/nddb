@@ -1,2 +1,7 @@
 .env
 __pycache__/
+*.log
+spell_check_counts.json
+build/
+dist/
+*.spec

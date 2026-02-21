@@ -1,5 +1,8 @@
 import json
+import logging
 from google import genai
+
+logger = logging.getLogger("nddb")
 
 SYSTEM_PROMPT = """당신은 한국어 '되/돼' 맞춤법 전문가입니다.
 
@@ -97,5 +100,5 @@ class GrammarChecker:
             return None
 
         except (json.JSONDecodeError, KeyError, Exception) as e:
-            print(f"[오류] Gemini API 호출 실패: {e}")
+            logger.error(f"Gemini API 호출 실패: {e}")
             return None
